@@ -1,78 +1,134 @@
 # WLAN Feature Validator
 
-A **working Wi-Fi packet model**. It does not need a real access point.
+[![CI](https://github.com/sreedeep123-star/wlan-feature-validator/actions/workflows/ci.yml/badge.svg)](https://github.com/sreedeep123-star/wlan-feature-validator/actions/workflows/ci.yml)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C)
+![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB)
+![Tests](https://img.shields.io/badge/tests-16%20unit%20%2B%2019%20checks-success)
+![Dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)
 
-Python creates fake Wi-Fi recordings (PCAP files). The analyzer reads those
-files and reports networks, security (Open / WPA2 / WPA3), client connect
-state, and disconnects. Automated tests check that the answers are correct.
+An IEEE 802.11 frame analyzer and feature-validation harness, written from the
+byte level up in **C++17 and Python** with no packet-parsing libraries. It reads
+PCAP/Radiotap captures, classifies WLAN security, tracks client state across
+access points, correlates AP logs with over-the-air frames, and proves all of it
+with an automated test suite that runs in CI.
 
-On this repo the **Python model is the engine that runs today**. The C++
-binary is the same idea for when a C++ compiler is installed.
-
-## What the model understands
-
-| 802.11 piece | What the code does |
-|---|---|
-| Classic PCAP + Radiotap | Finds each packet, skips the radio header |
-| Beacon / probe response | SSID, BSSID, channel, RSN security |
-| Authentication / association | Client state: authenticated then associated |
-| Deauthentication / disassociation | Reason code + disconnected state |
-| WPA2-PSK, WPA3-SAE, 802.1X, transition | RSN AKM suites 2, 8, 1, or 2+8 |
-| Protected Management Frames | Reports whether a deauthentication was protected |
-| Truncated tags | Counted as malformed, no crash |
-
-The captures are standard `DLT_IEEE802_11_RADIO` (link type 127) PCAP files, so
-the same fixtures open in Wireshark or `tshark` for side-by-side checking.
-
-## Beyond single frames
-
-- **Controller view** (`python/controller_view.py`) rolls several APs up into one
-  WLAN, lists clients per AP, and detects a client roaming from AP-1 to AP-2.
-- **Log correlation** (`python/log_correlator.py`) parses hostapd-style AP logs
-  and reports disconnects that appear in the log but never on the air, which is
-  the usual first step when a client "randomly" drops.
-- **Regression runner** (`automation/regression.py`) reproduces defect WLAN-114
-  (unprotected deauthentication kicks clients off) and then verifies the fix on
-  a Protected Management Frames build.
-
-## Run it (Python 3.9+, no extra packages)
+Everything below is reproducible on a laptop in under a minute. No access point,
+no wireless NIC, no monitor mode required.
 
 ```bash
+git clone https://github.com/sreedeep123-star/wlan-feature-validator
+cd wlan-feature-validator
 python demo.py
-python tests/test_wlan_model.py      # 16 unit tests
-python automation/validate.py        # 19 feature checks
-python automation/regression.py      # reproduce and verify defect WLAN-114
 ```
 
-Analyze one capture:
+## What it does
+
+| Capability | Where | Evidence |
+|---|---|---|
+| Parse classic PCAP + Radiotap, bounds-checked | `python/wlan_model.py`, `src/main.cpp` | malformed frames counted, never crash |
+| Beacon / probe decode: SSID, BSSID, channel | `wlan_model.py` | 6 networks found in the lab scan |
+| Security from RSN AKM suites | `classify_rsn()` | Open, WPA2-PSK, WPA2-Enterprise, WPA3-SAE, WPA3 transition |
+| Client state machine | `wlan_model.py` | auth → assoc → `associated` → `disconnected` |
+| Protected Management Frames | `wlan_model.py` | reports whether a deauth was protected |
+| Multi-AP controller roll-up + roaming | `python/controller_view.py` | detects STA moving AP-1 → AP-2 |
+| AP log vs air correlation | `python/log_correlator.py` | finds disconnects logged but never transmitted |
+| Defect reproduce-and-verify | `automation/regression.py` | WLAN-114 reproduced, then verified fixed |
+
+Captures are standard `DLT_IEEE802_11_RADIO` (link type 127), so the same files
+open in **Wireshark** or `tshark` for side-by-side confirmation.
+
+## Sample output
+
+`python demo.py` on the generated lab scan:
+
+```text
+=== Lab scan (lab-baseline.pcap) ===
+packets=6 malformed=0
+networks:
+  GuestOpen        02:00:00:00:00:01  OPEN               ch=1
+  CorpWPA2         02:00:00:00:00:02  WPA2-PSK           ch=6
+  SecureWPA3       02:00:00:00:00:03  WPA3-SAE           ch=11
+  CampusDot1X      02:00:00:00:00:04  WPA2-ENTERPRISE    ch=36
+  MixedWPA3        02:00:00:00:00:05  WPA3-TRANSITION    ch=6
+  <hidden>         02:00:00:00:00:06  WPA2-PSK           ch=6
+
+=== Controller view (roaming.pcap) ===
+  WLAN CorpWPA2 [WPA2-PSK] on AP-1, AP-2
+  roam: 02:00:00:00:10:01 AP-1 -> AP-2
+
+=== Log vs capture (ap-events-mismatch.log) ===
+  consistent: False
+  logged but never on air: line 3 02:00:00:00:99:99 reason 3
+```
+
+That last block is the interesting one: the AP logged a deauthentication for a
+client that never appears in the capture. On real gear that gap is where you
+start looking for the bug.
+
+## Validation
 
 ```bash
-python tools/generate_fixtures.py fixtures
-python python/analyze.py fixtures/handshake.pcap
+python tests/test_wlan_model.py      # 16 unit tests
+python automation/validate.py        # 19 feature checks -> validation-report.json
+python automation/regression.py      # defect WLAN-114 -> regression-report.json
 ```
 
-## Expected handshake result
+**Defect WLAN-114** — clients on the WPA2 SSID could be knocked off by an
+unprotected deauthentication frame, because Protected Management Frames were
+not negotiated. The runner reproduces it on the affected capture and confirms
+it is gone on the WPA3-SAE build:
 
-A client that authenticates and associates should end in state `associated`.
-A later deauthentication should move that station to `disconnected`.
+```text
+Defect WLAN-114: Unprotected deauthentication disconnects clients
+  reproduced on affected build : True
+  fix verified on patched build: True
+  verdict: FIXED
+```
+
+## Build the C++ analyzer
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+./build/wlan-analyzer fixtures/lab-baseline.pcap
+```
+
+Compiled with `-Wall -Wextra -Wpedantic -Werror` (GCC/Clang) or `/W4` (MSVC).
+CI builds it on both Linux and Windows.
+
+## Design notes
+
+- **No packet libraries on purpose.** Every offset is computed and length-checked
+  by hand, because the point is to understand the frame format rather than call
+  someone else's parser.
+- **Deterministic fixtures.** Captures are generated from code, so a test failure
+  always points at the analyzer and never at a flaky recording.
+- **Errors are data.** A truncated information element increments a malformed
+  counter and the run continues; it does not throw away the rest of the capture.
 
 ## Layout
 
 ```text
-python/wlan_model.py         working 802.11 parser
-python/controller_view.py    multi-AP / WLAN / roaming roll-up
+python/wlan_model.py         802.11 / Radiotap / PCAP parser
+python/controller_view.py    multi-AP WLAN and roaming roll-up
 python/log_correlator.py     AP log vs capture comparison
 python/analyze.py            JSON CLI
+src/main.cpp                 C++17 analyzer
 tools/generate_fixtures.py   lab captures and AP logs
 automation/validate.py       19 feature checks
-automation/regression.py     defect reproduce-and-verify run
+automation/regression.py     defect reproduce-and-verify
 tests/test_wlan_model.py     16 unit tests
-src/main.cpp                 C++ analyzer (needs a compiler)
-demo.py                      prints a readable lab report
+demo.py                      readable lab report
 ```
 
-## Honest scope
+## Scope
 
-This is a protocol model on synthetic packets. It is not Cisco AP firmware,
-not a controller, and not live Wireshark on a production network. It is meant
-to show C/C++ + Python + 802.11 + test automation on evidence you can rerun.
+This is a protocol model driven by synthetic captures. It is not vendor firmware,
+not a production controller, and it has not been run against a live enterprise
+network. It is passive by design: it never transmits frames, deauthenticates
+clients, or attempts to recover keys. Natural next steps are 802.11r/k/v roaming
+frames, EAPOL four-way handshake tracking, and fuzzing information elements.
+
+## License
+
+MIT
