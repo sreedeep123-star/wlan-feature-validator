@@ -1,0 +1,8 @@
+build/
+fixtures/
+validation-report.json
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
