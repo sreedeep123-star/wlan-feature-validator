@@ -34,6 +34,27 @@ def show(title: str, path: Path) -> None:
     print("frames:", {k: v for k, v in analysis["frame_counts"].items() if v})
 
 
+def show_rf(path: Path) -> None:
+    analysis = analyze_pcap_dict(path)
+    print(f"\n=== PHY and RF survey ({path.name}) ===")
+    for net in analysis["networks"]:
+        signal = net["signal"] or {}
+        print(
+            f"  {net['ssid']:12} {net['security']:10} {net['phy']:12} "
+            f"{net['band'] or '?':8} ch={net['channel']:<4} "
+            f"rssi={signal.get('mean_dbm', '?')} dBm ({signal.get('samples', 0)} samples)"
+        )
+
+
+def show_key_exchange(path: Path, label: str) -> None:
+    analysis = analyze_pcap_dict(path)
+    print(f"\n=== WPA2 4-way key exchange: {label} ({path.name}) ===")
+    for shake in analysis["handshakes"]:
+        seen = "".join(f"M{m}" for m in shake["messages"])
+        verdict = "keys installed" if shake["complete"] else "INCOMPLETE"
+        print(f"  {shake['station']} -> {shake['bssid']}  {seen}  {verdict}")
+
+
 def main() -> None:
     fixtures = ROOT / "fixtures"
     generate(fixtures)
@@ -42,6 +63,10 @@ def main() -> None:
     show("Disconnect", fixtures / "disconnect-event.pcap")
     show("Probe scan", fixtures / "probe-scan.pcap")
     show("Bad capture", fixtures / "malformed.pcap")
+
+    show_rf(fixtures / "phy-and-rf.pcap")
+    show_key_exchange(fixtures / "wpa2-4way.pcap", "healthy join")
+    show_key_exchange(fixtures / "wpa2-4way-incomplete.pcap", "stalls after M2")
 
     view = build_controller_view(
         fixtures / "roaming.pcap",

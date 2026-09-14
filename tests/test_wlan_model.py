@@ -15,7 +15,12 @@ sys.path.insert(0, str(ROOT / "tools"))
 from controller_view import build_controller_view  # noqa: E402
 from generate_fixtures import generate, rsn_element, write_pcap, beacon  # noqa: E402
 from log_correlator import correlate, parse_log  # noqa: E402
-from wlan_model import analyze_pcap_dict, classify_rsn  # noqa: E402
+from wlan_model import (  # noqa: E402
+    analyze_pcap_dict,
+    channel_from_frequency,
+    classify_eapol_key,
+    classify_rsn,
+)
 
 
 class RsnTests(unittest.TestCase):
@@ -80,6 +85,88 @@ class CaptureTests(unittest.TestCase):
         bad.write_bytes(data)
         with self.assertRaises(ValueError):
             analyze_pcap_dict(bad)
+
+
+class KeyExchangeTests(unittest.TestCase):
+    """WPA2/WPA3 4-way handshake decoding from EAPOL-Key frames."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.fixtures = Path(cls.tmp.name)
+        generate(cls.fixtures)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_key_info_bits_map_to_message_numbers(self):
+        self.assertEqual(classify_eapol_key(0x008A, 0), 1)
+        self.assertEqual(classify_eapol_key(0x010A, 22), 2)
+        self.assertEqual(classify_eapol_key(0x03CA, 0), 3)
+        self.assertEqual(classify_eapol_key(0x030A, 0), 4)
+
+    def test_group_key_frame_is_not_a_4way_message(self):
+        self.assertIsNone(classify_eapol_key(0x0382, 0))
+
+    def test_complete_four_way_marks_keys_installed(self):
+        analysis = analyze_pcap_dict(self.fixtures / "wpa2-4way.pcap")
+        self.assertEqual(analysis["frame_counts"]["eapol_key"], 4)
+        shake = analysis["handshakes"][0]
+        self.assertEqual(shake["messages"], [1, 2, 3, 4])
+        self.assertTrue(shake["complete"])
+        self.assertEqual(analysis["stations"][0]["state"], "key-exchange-complete")
+
+    def test_incomplete_four_way_is_flagged(self):
+        analysis = analyze_pcap_dict(self.fixtures / "wpa2-4way-incomplete.pcap")
+        shake = analysis["handshakes"][0]
+        self.assertEqual(shake["messages"], [1, 2])
+        self.assertFalse(shake["complete"])
+
+
+class PhyAndRfTests(unittest.TestCase):
+    """PHY generation from capability elements, band/RSSI from Radiotap."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.fixtures = Path(cls.tmp.name)
+        generate(cls.fixtures)
+        analysis = analyze_pcap_dict(cls.fixtures / "phy-and-rf.pcap")
+        cls.nets = {net["ssid"]: net for net in analysis["networks"]}
+        cls.malformed = analysis["malformed"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_radiotap_fields_do_not_corrupt_the_frame(self):
+        self.assertEqual(self.malformed, 0)
+
+    def test_detects_phy_generation(self):
+        self.assertEqual(self.nets["LegacyNet"]["phy"], "802.11a/b/g")
+        self.assertEqual(self.nets["WiFi4Net"]["phy"], "802.11n")
+        self.assertEqual(self.nets["WiFi5Net"]["phy"], "802.11ac")
+        self.assertEqual(self.nets["WiFi6Net"]["phy"], "802.11ax")
+
+    def test_maps_frequency_to_band(self):
+        self.assertEqual(self.nets["WiFi4Net"]["band"], "2.4 GHz")
+        self.assertEqual(self.nets["WiFi5Net"]["band"], "5 GHz")
+        self.assertEqual(self.nets["WiFi6Net"]["band"], "6 GHz")
+
+    def test_frequency_to_channel_arithmetic(self):
+        self.assertEqual(channel_from_frequency(2437), ("2.4 GHz", 6))
+        self.assertEqual(channel_from_frequency(2484), ("2.4 GHz", 14))
+        self.assertEqual(channel_from_frequency(5180), ("5 GHz", 36))
+        self.assertEqual(channel_from_frequency(6135), ("6 GHz", 37))
+        self.assertEqual(channel_from_frequency(1000), (None, None))
+
+    def test_aggregates_signal_strength_per_bssid(self):
+        signal = self.nets["WiFi6Net"]["signal"]
+        self.assertEqual(signal["samples"], 2)
+        self.assertEqual(signal["min_dbm"], -70)
+        self.assertEqual(signal["max_dbm"], -64)
+        self.assertEqual(signal["mean_dbm"], -67.0)
 
 
 class ControllerViewTests(unittest.TestCase):

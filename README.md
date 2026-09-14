@@ -3,7 +3,7 @@
 [![CI](https://github.com/sreedeep123-star/wlan-feature-validator/actions/workflows/ci.yml/badge.svg)](https://github.com/sreedeep123-star/wlan-feature-validator/actions/workflows/ci.yml)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C)
 ![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB)
-![Tests](https://img.shields.io/badge/tests-16%20unit%20%2B%2019%20checks-success)
+![Tests](https://img.shields.io/badge/tests-25%20unit%20%2B%2027%20checks-success)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)
 
 An IEEE 802.11 frame analyzer and feature-validation harness, written from the
@@ -28,7 +28,10 @@ python demo.py
 | Parse classic PCAP + Radiotap, bounds-checked | `python/wlan_model.py`, `src/main.cpp` | malformed frames counted, never crash |
 | Beacon / probe decode: SSID, BSSID, channel | `wlan_model.py` | 6 networks found in the lab scan |
 | Security from RSN AKM suites | `classify_rsn()` | Open, WPA2-PSK, WPA2-Enterprise, WPA3-SAE, WPA3 transition |
-| Client state machine | `wlan_model.py` | auth → assoc → `associated` → `disconnected` |
+| WPA2 4-way key exchange | `classify_eapol_key()` | EAPOL-Key M1–M4 tracked; stalled handshakes flagged |
+| PHY generation from capability IEs | `wlan_model.py` | 802.11n / ac / ax from HT, VHT and HE elements |
+| Radiotap RF metadata | `parse_radiotap()` | 2.4 / 5 / 6 GHz band, channel and per-BSSID RSSI |
+| Client state machine | `wlan_model.py` | auth → assoc → key exchange → `disconnected` |
 | Protected Management Frames | `wlan_model.py` | reports whether a deauth was protected |
 | Multi-AP controller roll-up + roaming | `python/controller_view.py` | detects STA moving AP-1 → AP-2 |
 | AP log vs air correlation | `python/log_correlator.py` | finds disconnects logged but never transmitted |
@@ -52,6 +55,16 @@ networks:
   MixedWPA3        02:00:00:00:00:05  WPA3-TRANSITION    ch=6
   <hidden>         02:00:00:00:00:06  WPA2-PSK           ch=6
 
+=== PHY and RF survey (phy-and-rf.pcap) ===
+  LegacyNet    WPA2-PSK   802.11a/b/g  2.4 GHz  ch=6    rssi=-42.0 dBm
+  WiFi4Net     WPA2-PSK   802.11n      2.4 GHz  ch=11   rssi=-58.0 dBm
+  WiFi5Net     WPA2-PSK   802.11ac     5 GHz    ch=36   rssi=-61.0 dBm
+  WiFi6Net     WPA3-SAE   802.11ax     6 GHz    ch=37   rssi=-67.0 dBm
+
+=== WPA2 4-way key exchange ===
+  02:00:00:00:10:01 -> 02:00:00:00:00:02  M1M2M3M4  keys installed
+  02:00:00:00:10:01 -> 02:00:00:00:00:02  M1M2      INCOMPLETE
+
 === Controller view (roaming.pcap) ===
   WLAN CorpWPA2 [WPA2-PSK] on AP-1, AP-2
   roam: 02:00:00:00:10:01 AP-1 -> AP-2
@@ -68,8 +81,8 @@ start looking for the bug.
 ## Validation
 
 ```bash
-python tests/test_wlan_model.py      # 16 unit tests
-python automation/validate.py        # 19 feature checks -> validation-report.json
+python tests/test_wlan_model.py      # 25 unit tests
+python automation/validate.py        # 27 feature checks -> validation-report.json
 python automation/regression.py      # defect WLAN-114 -> regression-report.json
 ```
 
@@ -115,9 +128,9 @@ python/log_correlator.py     AP log vs capture comparison
 python/analyze.py            JSON CLI
 src/main.cpp                 C++17 analyzer
 tools/generate_fixtures.py   lab captures and AP logs
-automation/validate.py       19 feature checks
+automation/validate.py       27 feature checks
 automation/regression.py     defect reproduce-and-verify
-tests/test_wlan_model.py     16 unit tests
+tests/test_wlan_model.py     25 unit tests
 demo.py                      readable lab report
 ```
 
@@ -126,8 +139,9 @@ demo.py                      readable lab report
 This is a protocol model driven by synthetic captures. It is not vendor firmware,
 not a production controller, and it has not been run against a live enterprise
 network. It is passive by design: it never transmits frames, deauthenticates
-clients, or attempts to recover keys. Natural next steps are 802.11r/k/v roaming
-frames, EAPOL four-way handshake tracking, and fuzzing information elements.
+clients, or attempts to recover keys. The 4-way handshake is tracked by its
+EAPOL-Key message sequence only; no key material is derived or cracked. Natural
+next steps are 802.11r/k/v fast-roaming frames and information-element fuzzing.
 
 ## License
 

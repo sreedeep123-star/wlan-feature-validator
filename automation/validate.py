@@ -117,8 +117,72 @@ def validate(fixtures: Path) -> list[Check]:
             baseline["malformed"] == 0 and handshake["malformed"] == 0,
             f"baseline={baseline['malformed']} handshake={handshake['malformed']}",
         ),
+        *key_exchange_checks(fixtures),
+        *phy_and_rf_checks(fixtures),
         *controller_checks(fixtures),
         *log_checks(fixtures),
+    ]
+
+
+def key_exchange_checks(fixtures: Path) -> list[Check]:
+    complete = analyze_pcap_dict(fixtures / "wpa2-4way.pcap")
+    partial = analyze_pcap_dict(fixtures / "wpa2-4way-incomplete.pcap")
+    done = complete["handshakes"][0] if complete["handshakes"] else {}
+    stalled = partial["handshakes"][0] if partial["handshakes"] else {}
+    return [
+        Check(
+            "decodes the WPA2 4-way key exchange end to end",
+            done.get("messages") == [1, 2, 3, 4] and done.get("complete") is True,
+            str(done),
+        ),
+        Check(
+            "counts EAPOL-Key frames separately from user data",
+            complete["frame_counts"]["eapol_key"] == 4,
+            str(complete["frame_counts"]),
+        ),
+        Check(
+            "marks the station once keys are installed",
+            complete["stations"][0]["state"] == "key-exchange-complete",
+            str(complete["stations"][0]),
+        ),
+        Check(
+            "flags a key exchange that stalls after M2",
+            stalled.get("messages") == [1, 2] and stalled.get("complete") is False,
+            str(stalled),
+        ),
+    ]
+
+
+def phy_and_rf_checks(fixtures: Path) -> list[Check]:
+    analysis = analyze_pcap_dict(fixtures / "phy-and-rf.pcap")
+    nets = by_ssid(analysis)
+    wifi6 = nets.get("WiFi6Net", {})
+    return [
+        Check(
+            "reports PHY generation from HT/VHT/HE capability elements",
+            nets.get("WiFi4Net", {}).get("phy") == "802.11n"
+            and nets.get("WiFi5Net", {}).get("phy") == "802.11ac"
+            and wifi6.get("phy") == "802.11ax",
+            str({ssid: net["phy"] for ssid, net in nets.items()}),
+        ),
+        Check(
+            "derives 2.4/5/6 GHz band from the Radiotap frequency",
+            nets.get("WiFi4Net", {}).get("band") == "2.4 GHz"
+            and nets.get("WiFi5Net", {}).get("band") == "5 GHz"
+            and wifi6.get("band") == "6 GHz",
+            str({ssid: net["band"] for ssid, net in nets.items()}),
+        ),
+        Check(
+            "aggregates signal strength per BSSID",
+            (wifi6.get("signal") or {}).get("samples") == 2
+            and (wifi6.get("signal") or {}).get("mean_dbm") == -67.0,
+            str(wifi6.get("signal")),
+        ),
+        Check(
+            "Radiotap field walk leaves frames intact",
+            analysis["malformed"] == 0 and analysis["frame_counts"]["beacon"] == 5,
+            f"malformed={analysis['malformed']} beacons={analysis['frame_counts']['beacon']}",
+        ),
     ]
 
 

@@ -10,9 +10,39 @@ from pathlib import Path
 RADIOTAP = b"\x00\x00\x08\x00\x00\x00\x00\x00"
 BROADCAST = b"\xff" * 6
 
+LLC_SNAP_EAPOL = b"\xaa\xaa\x03\x00\x00\x00\x88\x8e"
+
 
 def mac(value: str) -> bytes:
     return bytes.fromhex(value.replace(":", ""))
+
+
+def radiotap_rf(frequency: int, signal_dbm: int) -> bytes:
+    """Radiotap header carrying Rate, Channel and dBm antenna signal.
+
+    Channel is 2-byte aligned and the signal is a signed byte, so the layout
+    below matches what a real capture from a monitor-mode radio looks like.
+    """
+    present = (1 << 2) | (1 << 3) | (1 << 5)
+    body = b"\x02"  # rate, 1 byte, no alignment padding needed
+    body += b"\x00"  # pad so the channel field starts 2-byte aligned
+    body += struct.pack("<HH", frequency, 0x0480)
+    body += struct.pack("<b", signal_dbm)
+    length = 8 + len(body)
+    return struct.pack("<BBHI", 0, 0, length, present) + body
+
+
+def ht_capabilities() -> bytes:
+    return bytes([45, 26]) + b"\x00" * 26
+
+
+def vht_capabilities() -> bytes:
+    return bytes([191, 12]) + b"\x00" * 12
+
+
+def he_capabilities() -> bytes:
+    # Element ID 255 (extension) with extension ID 35 = HE Capabilities.
+    return bytes([255, 11, 35]) + b"\x00" * 10
 
 
 def rsn_element(*akm_suites: int) -> bytes:
@@ -48,6 +78,71 @@ def beacon(ssid: str, bssid: str, security: str, channel: int = 6, hidden: bool 
     elif security == "WPA3-TRANSITION":
         security_tag = rsn_element(2, 8)
     return RADIOTAP + header + fixed + ssid_tag + channel_tag + security_tag
+
+
+def rf_beacon(
+    ssid: str,
+    bssid: str,
+    security: str,
+    channel: int,
+    frequency: int,
+    signal_dbm: int,
+    phy: str = "802.11a/b/g",
+) -> bytes:
+    """Beacon with real Radiotap RF metadata and PHY capability elements."""
+    bssid_bytes = mac(bssid)
+    header = mgmt_header(8, BROADCAST, bssid_bytes, bssid_bytes)
+    fixed = b"\x00" * 8 + struct.pack("<HH", 100, 0x0411)
+    ssid_tag = bytes([0, len(ssid)]) + ssid.encode("utf-8")
+    channel_tag = bytes([3, 1, channel])
+    security_tag = rsn_element(8) if security == "WPA3-SAE" else rsn_element(2)
+    phy_tags = b""
+    if phy in ("802.11n", "802.11ac", "802.11ax"):
+        phy_tags += ht_capabilities()
+    if phy in ("802.11ac", "802.11ax"):
+        phy_tags += vht_capabilities()
+    if phy == "802.11ax":
+        phy_tags += he_capabilities()
+    return (
+        radiotap_rf(frequency, signal_dbm)
+        + header
+        + fixed
+        + ssid_tag
+        + channel_tag
+        + security_tag
+        + phy_tags
+    )
+
+
+def eapol_key(bssid: str, station: str, message: int) -> bytes:
+    """One message of the WPA2 4-way key exchange, carried in a QoS data frame."""
+    key_info = {1: 0x008A, 2: 0x010A, 3: 0x03CA, 4: 0x030A}[message]
+    key_data = b"\x30\x14" + b"\x00" * 20 if message == 2 else b""
+
+    body = b"\x02"  # EAPOL-Key descriptor type: RSN
+    body += struct.pack(">H", key_info)
+    body += struct.pack(">H", 16)  # key length
+    body += struct.pack(">Q", message)  # replay counter
+    body += bytes([message]) * 32  # nonce
+    body += b"\x00" * 16  # key IV
+    body += b"\x00" * 8  # RSC
+    body += b"\x00" * 8  # reserved
+    body += b"\x11" * 16 if key_info & 0x0100 else b"\x00" * 16  # MIC
+    body += struct.pack(">H", len(key_data)) + key_data
+
+    eapol = b"\x02\x03" + struct.pack(">H", len(body)) + body
+
+    ap = mac(bssid)
+    sta = mac(station)
+    from_ap = message in (1, 3)
+    frame_control = (2 << 2) | (8 << 4) | (0x0200 if from_ap else 0x0100)
+    if from_ap:
+        addresses = sta + ap + ap
+    else:
+        addresses = ap + sta + ap
+    header = struct.pack("<H", frame_control) + b"\x00\x00" + addresses + b"\x00\x00"
+    qos = b"\x00\x00"
+    return RADIOTAP + header + qos + LLC_SNAP_EAPOL + eapol
 
 
 def probe_request(station: str) -> bytes:
@@ -208,6 +303,44 @@ def generate(output: Path) -> None:
             authentication(ap2, sta, seq=2, from_ap=True),
             association_request("CorpWPA2", ap2, sta),
             association_response(ap2, sta, status=0),
+        ],
+    )
+
+    # Full WPA2 join: open auth, association, then the 4-way key exchange.
+    write_pcap(
+        output / "wpa2-4way.pcap",
+        [
+            beacon("CorpWPA2", corp, "WPA2-PSK", channel=6),
+            authentication(corp, sta, seq=1, from_ap=False),
+            authentication(corp, sta, seq=2, from_ap=True),
+            association_request("CorpWPA2", corp, sta),
+            association_response(corp, sta, status=0),
+            eapol_key(corp, sta, 1),
+            eapol_key(corp, sta, 2),
+            eapol_key(corp, sta, 3),
+            eapol_key(corp, sta, 4),
+        ],
+    )
+
+    # Key exchange that dies after M2: the client never gets keys installed.
+    write_pcap(
+        output / "wpa2-4way-incomplete.pcap",
+        [
+            beacon("CorpWPA2", corp, "WPA2-PSK", channel=6),
+            eapol_key(corp, sta, 1),
+            eapol_key(corp, sta, 2),
+        ],
+    )
+
+    # Radios on three bands advertising three PHY generations.
+    write_pcap(
+        output / "phy-and-rf.pcap",
+        [
+            rf_beacon("LegacyNet", "02:00:00:00:00:20", "WPA2-PSK", 6, 2437, -42),
+            rf_beacon("WiFi4Net", "02:00:00:00:00:21", "WPA2-PSK", 11, 2462, -58, "802.11n"),
+            rf_beacon("WiFi5Net", "02:00:00:00:00:22", "WPA2-PSK", 36, 5180, -61, "802.11ac"),
+            rf_beacon("WiFi6Net", "02:00:00:00:00:23", "WPA3-SAE", 37, 6135, -70, "802.11ax"),
+            rf_beacon("WiFi6Net", "02:00:00:00:00:23", "WPA3-SAE", 37, 6135, -64, "802.11ax"),
         ],
     )
 
