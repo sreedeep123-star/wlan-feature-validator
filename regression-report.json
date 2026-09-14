@@ -1,0 +1,25 @@
+{
+  "defect": "WLAN-114",
+  "title": "Unprotected deauthentication disconnects clients",
+  "reproduced_on_affected_build": true,
+  "reproduction_evidence": [
+    {
+      "transmitter": "02:00:00:00:00:02",
+      "receiver": "02:00:00:00:10:01",
+      "bssid": "02:00:00:00:00:02",
+      "reason": 7,
+      "protected": false
+    }
+  ],
+  "fix_verified": true,
+  "verification_evidence": [
+    {
+      "transmitter": "02:00:00:00:00:03",
+      "receiver": "02:00:00:00:10:01",
+      "bssid": "02:00:00:00:00:03",
+      "reason": 7,
+      "protected": true
+    }
+  ],
+  "verdict": "FIXED"
+}

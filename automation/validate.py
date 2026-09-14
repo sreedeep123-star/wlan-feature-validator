@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "python"))
 
+from controller_view import build_controller_view  # noqa: E402
 from generate_fixtures import generate  # noqa: E402
+from log_correlator import correlate  # noqa: E402
 from wlan_model import analyze_pcap_dict  # noqa: E402
 
 
@@ -114,6 +116,47 @@ def validate(fixtures: Path) -> list[Check]:
             "baseline fixtures parse cleanly",
             baseline["malformed"] == 0 and handshake["malformed"] == 0,
             f"baseline={baseline['malformed']} handshake={handshake['malformed']}",
+        ),
+        *controller_checks(fixtures),
+        *log_checks(fixtures),
+    ]
+
+
+def controller_checks(fixtures: Path) -> list[Check]:
+    view = build_controller_view(
+        fixtures / "roaming.pcap",
+        {"02:00:00:00:00:02": "AP-1", "02:00:00:00:00:0a": "AP-2"},
+    )
+    wlan = view["wlans"][0] if view["wlans"] else {}
+    return [
+        Check(
+            "controller view groups both APs under one WLAN",
+            len(view["access_points"]) == 2 and wlan.get("ssid") == "CorpWPA2" and len(wlan.get("aps", [])) == 2,
+            str(wlan),
+        ),
+        Check(
+            "detects client roam between access points",
+            len(view["roam_events"]) == 1
+            and view["roam_events"][0]["from_ap"] == "AP-1"
+            and view["roam_events"][0]["to_ap"] == "AP-2",
+            str(view["roam_events"]),
+        ),
+    ]
+
+
+def log_checks(fixtures: Path) -> list[Check]:
+    agree = correlate(fixtures / "disconnect-event.pcap", fixtures / "ap-events.log")
+    disagree = correlate(fixtures / "disconnect-event.pcap", fixtures / "ap-events-mismatch.log")
+    return [
+        Check(
+            "AP log matches the frames in the capture",
+            agree["consistent"] and len(agree["matched"]) == 2,
+            f"matched={len(agree['matched'])} log_events={agree['log_events']}",
+        ),
+        Check(
+            "flags a logged disconnect missing from the capture",
+            not disagree["consistent"] and len(disagree["logged_but_not_captured"]) == 1,
+            str(disagree["logged_but_not_captured"]),
         ),
     ]
 

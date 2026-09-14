@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "tools"))
 
+from controller_view import build_controller_view  # noqa: E402
 from generate_fixtures import generate, rsn_element, write_pcap, beacon  # noqa: E402
+from log_correlator import correlate, parse_log  # noqa: E402
 from wlan_model import analyze_pcap_dict, classify_rsn  # noqa: E402
 
 
@@ -78,6 +80,79 @@ class CaptureTests(unittest.TestCase):
         bad.write_bytes(data)
         with self.assertRaises(ValueError):
             analyze_pcap_dict(bad)
+
+
+class ControllerViewTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.fixtures = Path(cls.tmp.name)
+        generate(cls.fixtures)
+        cls.view = build_controller_view(
+            cls.fixtures / "roaming.pcap",
+            {"02:00:00:00:00:02": "AP-1", "02:00:00:00:00:0a": "AP-2"},
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_two_aps_one_wlan(self):
+        self.assertEqual(len(self.view["access_points"]), 2)
+        self.assertEqual(len(self.view["wlans"]), 1)
+        self.assertEqual(self.view["wlans"][0]["ssid"], "CorpWPA2")
+
+    def test_roam_direction(self):
+        self.assertEqual(len(self.view["roam_events"]), 1)
+        self.assertEqual(self.view["roam_events"][0]["from_ap"], "AP-1")
+        self.assertEqual(self.view["roam_events"][0]["to_ap"], "AP-2")
+
+    def test_no_roam_without_second_ap(self):
+        view = build_controller_view(self.fixtures / "handshake.pcap")
+        self.assertEqual(view["roam_events"], [])
+
+
+class LogCorrelationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.fixtures = Path(cls.tmp.name)
+        generate(cls.fixtures)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_parses_hostapd_lines(self):
+        events = parse_log(self.fixtures / "ap-events.log")
+        self.assertEqual(len(events), 4)
+        self.assertEqual(events[0]["event"], "authenticated")
+        self.assertEqual(events[2]["reason"], 7)
+
+    def test_log_agrees_with_capture(self):
+        result = correlate(self.fixtures / "disconnect-event.pcap", self.fixtures / "ap-events.log")
+        self.assertTrue(result["consistent"])
+        self.assertEqual(len(result["matched"]), 2)
+
+    def test_detects_log_only_disconnect(self):
+        result = correlate(
+            self.fixtures / "disconnect-event.pcap", self.fixtures / "ap-events-mismatch.log"
+        )
+        self.assertFalse(result["consistent"])
+        self.assertEqual(len(result["logged_but_not_captured"]), 1)
+        self.assertEqual(result["logged_but_not_captured"][0]["reason"], 3)
+
+
+class RegressionTests(unittest.TestCase):
+    def test_defect_reproduced_then_fixed(self):
+        sys.path.insert(0, str(ROOT / "automation"))
+        from regression import run  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run(Path(tmp))
+        self.assertTrue(report["reproduced_on_affected_build"])
+        self.assertTrue(report["fix_verified"])
+        self.assertEqual(report["verdict"], "FIXED")
 
 
 if __name__ == "__main__":

@@ -191,6 +191,68 @@ def generate(output: Path) -> None:
         [malformed_beacon("02:00:00:00:00:08")],
     )
 
+    # Two APs advertising one SSID: the client associates to AP1, is moved off,
+    # then associates to AP2. A controller should report this as a roam.
+    ap2 = "02:00:00:00:00:0a"
+    write_pcap(
+        output / "roaming.pcap",
+        [
+            beacon("CorpWPA2", corp, "WPA2-PSK", channel=6),
+            beacon("CorpWPA2", ap2, "WPA2-PSK", channel=36),
+            authentication(corp, sta, seq=1, from_ap=False),
+            authentication(corp, sta, seq=2, from_ap=True),
+            association_request("CorpWPA2", corp, sta),
+            association_response(corp, sta, status=0),
+            disassociation(corp, sta, reason=8),
+            authentication(ap2, sta, seq=1, from_ap=False),
+            authentication(ap2, sta, seq=2, from_ap=True),
+            association_request("CorpWPA2", ap2, sta),
+            association_response(ap2, sta, status=0),
+        ],
+    )
+
+    # Protected Management Frames enabled: the deauthentication is protected.
+    write_pcap(
+        output / "pmf-enabled.pcap",
+        [
+            beacon("SecureWPA3", "02:00:00:00:00:03", "WPA3-SAE", channel=11),
+            deauthentication("02:00:00:00:00:03", sta, reason=7, protected=True),
+        ],
+    )
+
+    # AP log that agrees with disconnect-event.pcap.
+    (output / "ap-events.log").write_text(
+        "\n".join(
+            [
+                "Nov 14 09:21:02 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: authenticated",
+                "Nov 14 09:21:02 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: associated (aid 1)",
+                "Nov 14 09:24:48 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: "
+                "deauthenticated due to inactivity (timer DEAUTH/REMOVE) reason 7",
+                "Nov 14 09:24:49 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: "
+                "disassociated reason 8",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # Same log with a disconnect the capture never shows: the mismatch case.
+    (output / "ap-events-mismatch.log").write_text(
+        "\n".join(
+            [
+                "Nov 14 09:21:02 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: authenticated",
+                "Nov 14 09:24:48 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: "
+                "deauthenticated due to inactivity (timer DEAUTH/REMOVE) reason 7",
+                "Nov 14 09:24:48 ap1 hostapd: wlan0: STA 02:00:00:00:99:99 IEEE 802.11: "
+                "deauthenticated due to local deauth request reason 3",
+                "Nov 14 09:24:49 ap1 hostapd: wlan0: STA 02:00:00:00:10:01 IEEE 802.11: "
+                "disassociated reason 8",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "tools"))
 
+from controller_view import build_controller_view  # noqa: E402
 from generate_fixtures import generate  # noqa: E402
+from log_correlator import correlate  # noqa: E402
 from wlan_model import analyze_pcap_dict  # noqa: E402
 
 
@@ -40,6 +42,22 @@ def main() -> None:
     show("Disconnect", fixtures / "disconnect-event.pcap")
     show("Probe scan", fixtures / "probe-scan.pcap")
     show("Bad capture", fixtures / "malformed.pcap")
+
+    view = build_controller_view(
+        fixtures / "roaming.pcap",
+        {"02:00:00:00:00:02": "AP-1", "02:00:00:00:00:0a": "AP-2"},
+    )
+    print("\n=== Controller view (roaming.pcap) ===")
+    for wlan in view["wlans"]:
+        print(f"  WLAN {wlan['ssid']} [{wlan['security']}] on {', '.join(wlan['aps'])}")
+    for roam in view["roam_events"]:
+        print(f"  roam: {roam['station']} {roam['from_ap']} -> {roam['to_ap']}")
+
+    result = correlate(fixtures / "disconnect-event.pcap", fixtures / "ap-events-mismatch.log")
+    print("\n=== Log vs capture (ap-events-mismatch.log) ===")
+    print(f"  consistent: {result['consistent']}")
+    for entry in result["logged_but_not_captured"]:
+        print(f"  logged but never on air: line {entry['line']} {entry['station']} reason {entry['reason']}")
 
 
 if __name__ == "__main__":
